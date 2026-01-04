@@ -8,7 +8,7 @@ from datetime import datetime
 from sentence_transformers import SentenceTransformer, util
 import uuid
 import time
-import sqlite3 # <--- Η ΒΑΣΗ ΔΕΔΟΜΕΝΩΝ
+import sqlite3
 
 # --- 1. Ρυθμίσεις ---
 st.set_page_config(page_title="Uni Helpdesk Pro", page_icon="🏛️", layout="wide")
@@ -22,27 +22,25 @@ try:
         model = load_model()
 except: st.stop()
 
-# Αρχεία: Το knowledge μένει Excel (για ευκολία), τα Tickets πάνε σε Βάση (για ασφάλεια)
+# Αρχεία
 FILES_PATH = {'db': 'helpdesk.db', 'knowledge': 'knowledge.xlsx'}
 
-# SMTP
+# --- 2. Ρύθμιση Email (Secrets ή Test) ---
 if 'email' in st.secrets:
     SMTP_SERVER = st.secrets["email"]["smtp_server"]
     SMTP_PORT = st.secrets["email"]["smtp_port"]
     SMTP_EMAIL = st.secrets["email"]["address"]
     SMTP_PASSWORD = st.secrets["email"]["password"]
 else:
+    # Ρυθμίσεις για τοπική δοκιμή (αν δεν υπάρχουν secrets)
     SMTP_SERVER = "smtp.upatras.gr"
     SMTP_EMAIL = "test@upatras.gr"
     SMTP_PASSWORD = "test"
 
-# --- 2. Database Functions (SQLite) ---
-
+# --- 3. Database Functions (SQLite) ---
 def init_db():
-    """Δημιουργεί τη βάση και τον πίνακα αν δεν υπάρχουν"""
     conn = sqlite3.connect(FILES_PATH['db'])
     c = conn.cursor()
-    # Δημιουργία πίνακα με ασφάλεια
     c.execute('''
         CREATE TABLE IF NOT EXISTS tickets (
             id TEXT PRIMARY KEY,
@@ -59,14 +57,12 @@ def init_db():
     conn.close()
 
 def get_all_tickets():
-    """Διαβάζει όλα τα tickets σε μορφή DataFrame"""
     conn = sqlite3.connect(FILES_PATH['db'])
     df = pd.read_sql_query("SELECT * FROM tickets", conn)
     conn.close()
     return df
 
 def add_ticket(category, role, name, email, issue):
-    """Προσθέτει νέο ticket στη βάση"""
     ticket_id = str(uuid.uuid4())[:4].upper()
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
     
@@ -81,28 +77,17 @@ def add_ticket(category, role, name, email, issue):
     return ticket_id
 
 def update_tickets_batch(edited_df):
-    """Ενημερώνει μαζικά τα tickets από το Admin Panel"""
     conn = sqlite3.connect(FILES_PATH['db'])
     c = conn.cursor()
-    
-    # Μετατρέπουμε το DataFrame σε λίστα για να τρέξει γρήγορα
-    # Ενημερώνουμε ΜΟΝΟ το Status και την Κατηγορία βάσει του ID
     data_to_update = []
     for index, row in edited_df.iterrows():
         data_to_update.append((row['status'], row['category'], row['id']))
     
-    # Μαζικό Update (αστραπιαίο και ασφαλές)
-    c.executemany('''
-        UPDATE tickets 
-        SET status = ?, category = ? 
-        WHERE id = ?
-    ''', data_to_update)
-    
+    c.executemany('UPDATE tickets SET status = ?, category = ? WHERE id = ?', data_to_update)
     conn.commit()
     conn.close()
 
-# --- 3. Logic ---
-
+# --- 4. Logic & AI ---
 def load_knowledge():
     if not os.path.exists(FILES_PATH['knowledge']):
         pd.DataFrame({"Question": ["Παράδειγμα"], "Answer": ["Απάντηση"]}).to_excel(FILES_PATH['knowledge'], index=False)
@@ -118,7 +103,7 @@ def load_knowledge():
     except:
         return None, None
 
-# Αρχικοποίηση Βάσης
+# Αρχικοποίηση
 init_db()
 df_kb, kb_embeddings = load_knowledge()
 
@@ -130,16 +115,28 @@ def find_answer_ai(user_question):
         return df_kb.iloc[int(scores.argmax())]['Answer']
     return None
 
-def send_email_dummy(to_email, ticket_id):
-    # Εδώ θα μπει η κανονική send_email
-    pass 
+def send_email(to_email, subject, body):
+    msg = MIMEMultipart()
+    msg['From'] = SMTP_EMAIL
+    msg['To'] = to_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, 587)
+        server.starttls()
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.sendmail(SMTP_EMAIL, to_email, msg.as_string())
+        server.quit()
+        return True
+    except:
+        return False
 
-# --- 4. UI ---
-st.title("🏛️ Ηλεκτρονική Γραμματεία (Pro)")
+# --- 5. UI ---
+st.title("🏛️ Ηλεκτρονική Γραμματεία")
 
 tab1, tab2, tab3 = st.tabs(["💬 Εξυπηρέτηση", "🔍 Παρακολούθηση", "🔐 Γραφείο"])
 
-# --- TAB 1: NEW TICKET ---
+# --- TAB 1: ΝΕΑ ΑΙΤΗΣΗ ---
 with tab1:
     col1, col2 = st.columns(2)
     role = col1.selectbox("Ιδιότητα:", ["Φοιτητής", "Άλλο"])
@@ -158,23 +155,26 @@ with tab1:
             desc = st.text_area("Λεπτομέρειες", value=q)
             if st.form_submit_button("Υποβολή") and name and email:
                 tid = add_ticket(cat, role, name, email, desc)
+                
+                # Αποστολή Email
+                subject = f"Αίτημα: {tid}"
+                body = f"Γεια σας {name},\nΟ κωδικός αιτήματός σας είναι: {tid}"
+                ok = send_email(email, subject, body)
+                
                 st.success(f"Εστάλη! Κωδικός: {tid}")
-                send_email_dummy(email, tid)
+                if not ok: st.warning("Το email επιβεβαίωσης ίσως δεν εστάλη (ελέγξτε ρυθμίσεις).")
 
 # --- TAB 2: TRACKER ---
 with tab2:
     tid = st.text_input("Κωδικός Αίτησης:")
     if st.button("Αναζήτηση"):
-        # Σύνδεση με βάση για έλεγχο
         conn = sqlite3.connect(FILES_PATH['db'])
-        # Χρήση παραμέτρων (?) για ασφάλεια (SQL Injection protection)
         res = pd.read_sql_query("SELECT date, category, status FROM tickets WHERE id = ?", conn, params=(tid.strip().upper(),))
         conn.close()
         
         if not res.empty:
             status = res.iloc[0]['status']
             st.info(f"📅 {res.iloc[0]['date']} | 📂 {res.iloc[0]['category']}")
-            
             if status == "Έτοιμο":
                 st.balloons()
                 st.success(f"✅ Κατάσταση: {status}")
@@ -183,15 +183,18 @@ with tab2:
         else:
             st.error("Δεν βρέθηκε.")
 
-# --- TAB 3: ADMIN (ΑΣΦΑΛΕΣ) ---
+# --- TAB 3: ADMIN (ΑΥΣΤΗΡΟ) ---
 with tab3:
     pwd = st.text_input("Κωδικός Προσωπικού", type="password")
     
-    # --- Η ΔΙΟΡΘΩΣΗ ΓΙΑ ΤΟΝ ΚΩΔΙΚΟ ---
+    # 1. Παίρνουμε τον κωδικό ΜΟΝΟ από τα Secrets
     if 'admin_password' in st.secrets:
         admin_pass = st.secrets["admin_password"]
     else:
-        admin_pass = "admin123" # Fallback για τοπική χρήση
+        # Αν δεν βρεθούν secrets (π.χ. τοπικά χωρίς αρχείο), 
+        # βάζουμε έναν κωδικό που δεν μπορεί να μαντέψει κανείς.
+        # Έτσι το "admin123" σταματάει να δουλεύει.
+        admin_pass = "X@_NO_ACCESS_WITHOUT_SECRETS_@X"
     # ---------------------------------
 
     if pwd == admin_pass:
