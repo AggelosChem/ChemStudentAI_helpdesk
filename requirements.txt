@@ -1,5 +1,9 @@
-streamlit
-pandas
-openpyxl
-sentence-transformers
-torch
+keybert==0.9.0
+pandas==2.3.3
+Pillow==12.1.0
+pypdf==6.5.0
+pywebview==6.1
+rapidfuzz==3.14.3
+sentence_transformers==5.2.0
+streamlit==1.52.2
+torch==2.9.1
